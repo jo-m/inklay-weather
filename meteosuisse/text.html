@@ -1,0 +1,332 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Meteo Chart</title>
+    <meta charset="utf-8" />
+    <script
+      src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
+      integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    ></script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Oswald:wght@200..700&display=swap"
+      rel="stylesheet"
+    />
+
+    <script>
+      const LOCALE = "de-CH";
+
+      function transformData(data) {
+        const keys = [
+          "rainfall",
+          "sunshine",
+          "symbols",
+          "temperature",
+          "variance_rain",
+          "variance_range", // This is temperature variance.
+          "wind_gust_speed_variance",
+          "wind_speed_variance",
+        ];
+        const joined = data.reduce((acc, curr) => {
+          keys.forEach((key) => {
+            if (!acc[key]) {
+              acc[key] = [];
+            }
+
+            acc[key].push(...curr[key]);
+          });
+          return acc;
+        }, {});
+
+        // Those have one more level of nesting.
+        const keys2 = ["wind", "wind_gust_peak"];
+        data.reduce((acc, curr) => {
+          keys2.forEach((key0) => {
+            for (const [key1, value] of Object.entries(curr[key0])) {
+              const fullKey = `${key0}_${key1}`;
+
+              if (!acc[fullKey]) {
+                acc[fullKey] = [];
+              }
+
+              acc[fullKey].push(...curr[key0][key1]);
+            }
+          });
+          return acc;
+        }, joined);
+
+        // Special case for symbols.
+        const symbols = joined.symbols.map((s) => ({
+          timestamp: new Date(s.timestamp),
+          symbol: s.weather_symbol_id,
+        }));
+        delete joined.symbols;
+        const windSymbols = joined.wind_symbols.map((s) => ({
+          timestamp: new Date(s.timestamp),
+          symbol: s.symbol_id,
+        }));
+        delete joined.wind_symbols;
+
+        // Extract all the values as separate series.
+        const timestamps = joined["rainfall"].map((r) => r[0]);
+        const objectOfArrays = {};
+        for (const [key, series] of Object.entries(joined)) {
+          for (const [i, [timestamp, ...vals]] of series.entries()) {
+            // Assert that timestamps are equal for all series.
+            if (timestamp !== timestamps[i]) {
+              throw `Timestamp mismatch in ${key} at index ${i}: ${timestamp} !== ${timestamps[i]}`;
+            }
+
+            for (const [j, value] of vals.entries()) {
+              const fullKey = `${key}_${j}`;
+              if (!objectOfArrays[fullKey]) {
+                objectOfArrays[fullKey] = [];
+              }
+
+              objectOfArrays[fullKey].push(value);
+            }
+          }
+        }
+
+        objectOfArrays.timestamps = timestamps.map((ts) => new Date(ts));
+
+        const arrayOfObjects = timestamps.map((ts, i) => {
+          const obj = {};
+          for (const [key, series] of Object.entries(objectOfArrays)) {
+            obj[key] = series[i];
+          }
+          return obj;
+        });
+
+        return {
+          objectOfArrays,
+          arrayOfObjects,
+          symbols,
+          windSymbols,
+          sunrises: data.map((d) => ({ timestamp: new Date(d.sunrise) })),
+          sunsets: data.map((d) => ({ timestamp: new Date(d.sunset) })),
+          time: new Date(data[0].current_time),
+        };
+      }
+
+      async function proxyFetch(url, secretToken) {
+        const proxyUrl = "proxy.php";
+
+        const resp = await fetch(proxyUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+          },
+          body: new URLSearchParams({
+            secret_token: secretToken,
+            url: url,
+          }).toString(),
+        });
+        return await resp.json();
+      }
+
+      function getVersions(proxyToken) {
+        const versionsURL =
+          "https://www.meteoschweiz.admin.ch/product/output/versions.json";
+        return proxyFetch(versionsURL, proxyToken);
+      }
+
+      function productURL(versions, zipcode, product) {
+        return `https://www.meteoschweiz.admin.ch/product/output/${product}/version__${versions[product]}/de/${zipcode}.json`;
+      }
+
+      function addDays(date, days) {
+        var result = new Date(date);
+        result.setDate(result.getDate() + days);
+        return result;
+      }
+
+      async function loadAndPresent() {
+        const params = new URL(window.location).searchParams;
+        const proxySecretToken = params.get("proxySecretToken");
+        const zipcode = params.get("zipcode");
+
+        const versions = await getVersions(proxySecretToken);
+        const productUrl = productURL(versions, zipcode, "forecast-chart");
+
+        const data = await proxyFetch(productUrl, proxySecretToken);
+        const transformed = transformData(data);
+        console.log("Data (transformed):", transformed);
+
+        const metaURL = productURL(
+          versions,
+          zipcode,
+          "weather-widget/forecast",
+        );
+        const meta = await proxyFetch(metaURL, proxySecretToken);
+
+        showText(transformed, meta.data);
+      }
+
+      function timeFormatKitchen(ts) {
+        return ts.toLocaleString(LOCALE, {
+          hour: "numeric",
+          minute: "numeric",
+        });
+      }
+
+      function getDay(nextDayIfLaterThan) {
+        // Everything is in local timezone.
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // This should work even on time change.
+        const tomorrow = new Date(today.getTime() + 36 * 60 * 60 * 1000);
+        tomorrow.setHours(0, 0, 0, 0);
+
+        const now = new Date();
+        if (now.getHours() >= nextDayIfLaterThan) {
+          return tomorrow;
+        }
+        return today;
+      }
+
+      function dayTime(day, hour, minute) {
+        const ret = new Date(day);
+        ret.setHours(hour, minute);
+        return ret;
+      }
+
+      function rainMMHToText(mmH, mmhMaybe) {
+        if (mmH > 10) {
+          return "Viel Regen";
+        }
+        if (mmH > 2) {
+          if (mmhMaybe > 10) {
+            return "Regen (vielleicht viel)";
+          }
+          return "Regen";
+        }
+        if (mmH > 0) {
+          if (mmhMaybe > 2) {
+            return "Regen";
+          }
+          return "Wenig Regen";
+        }
+        if (mmhMaybe > 0) {
+          return "Vielleicht Regen";
+        }
+        return "Kein Regen";
+      }
+
+      async function showText(data, meta) {
+        const now = new Date();
+        const day = getDay(18);
+
+        // Interval for computing rain.
+        const rainInterval = [dayTime(day, 7, 0), dayTime(day, 22, 0)];
+        if (now > rainInterval[0]) {
+          rainInterval[0] = now;
+        }
+
+        // Time points for temperature and wind.
+        const times = [
+          { ts: dayTime(day, 7, 0), text: "Morgens" },
+          { ts: dayTime(day, 12, 0), text: "Mittags" },
+          { ts: dayTime(day, 18, 0), text: "Abends" },
+        ];
+
+        // Calculate avg rain.
+        // We assume that the periods are equal for all points.
+        const rainSum = data.arrayOfObjects.reduce(
+          (acc, curr, ix, arr) => {
+            if (
+              curr.timestamps < rainInterval[0] ||
+              curr.timestamps > rainInterval[1]
+            ) {
+              return acc;
+            }
+
+            acc.rain += curr.rainfall_0;
+            acc.rainMaybe += curr.variance_rain_1;
+            acc.cnt++;
+
+            return acc;
+          },
+          { rain: 0, rainMaybe: 0, cnt: 0 },
+        );
+        const periodS =
+          (data.arrayOfObjects[1].timestamps -
+            data.arrayOfObjects[0].timestamps) /
+          1000;
+        const rainMMH = (rainSum.rain / periodS / rainSum.cnt) * 3600;
+        const rainMaybeMMH = (rainSum.rainMaybe / periodS / rainSum.cnt) * 3600;
+
+        // Temperature, Wind
+        const timesText = times
+          .map(({ ts, text }) => {
+            const ix = d3
+              .bisector((x) => x["timestamps"])
+              .right(data.arrayOfObjects, ts);
+            const d = data.arrayOfObjects[ix];
+
+            const temp =
+              d.variance_range_1 - d.variance_range_0 >= 4
+                ? `${Math.round(d.variance_range_0).toString()}-${Math.round(d.variance_range_1).toString()}`
+                : Math.round(d.temperature_0).toString();
+            const wind =
+              d.wind_speed_variance_1 - d.wind_speed_variance_0 >= 5
+                ? `${Math.round(d.wind_speed_variance_0).toString()}-${Math.round(d.wind_speed_variance_1).toString()}`
+                : Math.round(d.wind_data_0).toString();
+            const windIx = d3
+              .bisector((x) => x["timestamp"])
+              .right(data.windSymbols, ts);
+
+            return `${text}: ${temp}°C, Wind ${wind}km/h ${data.windSymbols[windIx].symbol}`;
+          })
+          .join("<br>");
+
+        document.getElementById("place").innerText =
+          `${meta.city_name}, ${meta.altitude}m`;
+        document.getElementById("day").innerText =
+          `${day.toLocaleString(LOCALE, { weekday: "long" })} – ${rainMMHToText(rainMMH, rainMaybeMMH)}`;
+        document.getElementById("times").innerHTML = timesText;
+      }
+
+      window.onload = async () => {
+        try {
+          await loadAndPresent();
+        } catch (error) {
+          console.error("Error:", error);
+          alert("Error: " + error);
+        }
+      };
+    </script>
+
+    <style>
+      body {
+        font-family: "Oswald", sans-serif;
+        margin: 30px;
+      }
+      #place {
+        font-weight: 200;
+        font-size: 70px;
+        color: #444;
+      }
+      #day {
+        font-weight: 400;
+        font-size: 95px;
+      }
+      #times {
+        margin-top: 50px;
+        font-weight: 300;
+        font-size: 70px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="place"></div>
+    <div id="day"></div>
+    <div id="times"></div>
+  </body>
+</html>
