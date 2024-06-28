@@ -1,5 +1,7 @@
 # Weather displays for [Inklay](https://www.inklay.app/)
 
+[<img src="meteosuisse/demo.jpg">](meteosuisse/demo.jpg)
+
 The [low-effort/](low-effort) ones are just static HTML files you can put onto any web hosting.
 
 The [meteosuisse/](meteosuisse/) one is slightly more sophisticated - it requires a proxy to overcome the https://www.meteoschweiz.admin.ch/ CORS restrictions.
